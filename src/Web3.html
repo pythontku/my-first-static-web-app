@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>各縣市長照機構查詢</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    
+    <style>
+        body { background-color: #f8f9fa; padding-top: 20px; font-family: "Microsoft JhengHei", sans-serif; }
+        .table-responsive { background-color: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .filter-section { background-color: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        .loading-spinner { display: none; text-align: center; padding: 20px; }
+        .table th { white-space: nowrap; }
+        /* 地圖容器樣式 */
+        #map { height: 400px; width: 100%; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); z-index: 1; }
+    </style>
+</head>
+<body>
+
+<div class="container-fluid px-4">
+    <h2 class="mb-4 text-center text-primary fw-bold">各縣市長照機構查詢</h2>
+
+    <div class="filter-section row g-3 align-items-end">
+        <div class="col-md-3">
+            <label for="cityFilter" class="form-label fw-bold">篩選縣市</label>
+            <select id="cityFilter" class="form-select">
+                <option value="all">全部縣市</option>
+            </select>
+        </div>
+        <div class="col-md-3">
+            <label for="serviceFilter" class="form-label fw-bold">篩選特約服務項目</label>
+            <select id="serviceFilter" class="form-select">
+                <option value="all">全部服務項目</option>
+            </select>
+        </div>
+        <div class="col-md-3">
+            <label for="validFilter" class="form-label fw-bold">篩選特約狀態</label>
+            <select id="validFilter" class="form-select">
+                <option value="all">全部狀態</option>
+                <option value="valid">有效 (迄日 > 2026/01/01)</option>
+                <option value="invalid">無效 (迄日 <= 2026/01/01)</option>
+            </select>
+        </div>
+        <div class="col-md-3">
+            <button id="reloadBtn" class="btn btn-success w-100">重新載入資料</button>
+        </div>
+    </div>
+
+    <div class="row mb-4">
+        <div class="col-12">
+            <div id="map"></div>
+        </div>
+    </div>
+
+    <div id="loading" class="loading-spinner">
+        <div class="spinner-border text-primary" role="status">
+            <span class="visually-hidden">載入中...</span>
+        </div>
+        <p class="mt-2 text-muted">正在獲取最新 CSV 資料並進行解析排序...</p>
+    </div>
+
+    <div class="table-responsive">
+        <table class="table table-striped table-hover align-middle mb-0">
+            <thead class="table-dark">
+                <tr>
+                    <th>筆數</th>
+                    <th>縣市</th>
+                    <th>機構名稱</th>
+                    <th>地址</th>
+                    <th>特約服務項目</th>
+                    <th>電話</th>
+                    <th>特約起日</th>
+                    <th>特約迄日</th>
+                </tr>
+            </thead>
+            <tbody id="dataTableBody">
+                </tbody>
+        </table>
+    </div>
+
+    <nav class="mt-4 pb-5 d-flex flex-column flex-md-row justify-content-between align-items-center">
+        <div id="pageInfo" class="text-muted mb-3 mb-md-0"></div>
+        <ul class="pagination mb-0" id="pagination">
+            </ul>
+    </nav>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+<script>
+    // CSV 檔案來源
+    const CSV_URL = 'https://ltcpap.mohw.gov.tw/publish/abc.csv'; 
+
+    // 縣市代碼對照表
+    const MAPPING = {
+        city: {
+            "63000": "臺北市", "64000": "高雄市", "65000": "新北市",
+            "66000": "臺中市", "67000": "臺南市", "68000": "桃園市",
+            "10002": "宜蘭縣", "10004": "新竹縣", "10005": "苗栗縣",
+            "10007": "彰化縣", "10008": "南投縣", "10009": "雲林縣",
+            "10010": "嘉義縣", "10013": "屏東縣", "10014": "臺東縣",
+            "10015": "花蓮縣", "10016": "澎湖縣", "10017": "基隆市",
+            "10018": "新竹市", "10020": "嘉義市", "09020": "金門縣",
+            "09007": "連江縣"
+        }
+    };
+
+    // 全域變數
+    let rawData = [];
+    let filteredData = [];
+    let currentPage = 1;
+    const rowsPerPage = 20;
+
+    // 地圖全域變數
+    let map;
+    let markerGroup; // 用來統一管理地圖上的標記群組
+
+    // DOM 元素
+    const dataTableBody = document.getElementById('dataTableBody');
+    const cityFilter = document.getElementById('cityFilter');
+    const serviceFilter = document.getElementById('serviceFilter');
+    const validFilter = document.getElementById('validFilter');
+    const pagination = document.getElementById('pagination');
+    const pageInfo = document.getElementById('pageInfo');
+    const loading = document.getElementById('loading');
+    const reloadBtn = document.getElementById('reloadBtn');
+
+    // 初始化程式
+    function init() {
+        initMap(); // 先初始化地圖
+        fetchData();
+        setupListeners();
+    }
+
+    // 初始化 Leaflet 地圖
+    function initMap() {
+        // 預設中心點設為台灣中心，縮放等級為 7
+        map = L.map('map').setView([23.6978, 120.9605], 7);
+        
+        // 載入 OpenStreetMap 圖資 (免費、開源)
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        }).addTo(map);
+
+        // 建立一個圖層群組，方便後續一次性清除所有標記
+        markerGroup = L.layerGroup().addTo(map);
+    }
+
+    // 更新地圖標記的函式
+    function updateMapMarkers(pageData) {
+        if (!map || !markerGroup) return;
+
+        // 清除舊的標記
+        markerGroup.clearLayers();
+
+        if (pageData.length === 0) return;
+
+        // 用來記錄所有有效經緯度，以計算最佳視角範圍
+        let bounds = [];
+
+        pageData.forEach((row, index) => {
+            const lat = parseFloat(row['緯度']);
+            const lng = parseFloat(row['經度']);
+
+            if (!isNaN(lat) && !isNaN(lng)) {
+                // 建立標記
+                const marker = L.marker([lat, lng]);
+                
+                // 點擊標記時顯示的資訊視窗內容
+                const popupContent = `
+                    <div style="font-size: 14px;">
+                        <strong>${row['機構名稱'] || '未知機構'}</strong><br>
+                        <hr style="margin: 5px 0;">
+                        📍 ${row['地址全址'] || ''}<br>
+                        📞 ${row['機構電話'] || ''}
+                    </div>
+                `;
+                marker.bindPopup(popupContent);
+                
+                // 將標記加入群組
+                markerGroup.addLayer(marker);
+                
+                // 記錄座標供後續調整視角使用
+                bounds.push([lat, lng]);
+            }
+        });
+
+        // 如果有有效座標，自動調整地圖範圍以容納所有標記
+        if (bounds.length > 0) {
+            // fitBounds 會自動縮放和平移，第二個參數可以設定邊界留白和最大縮放級別
+            map.fitBounds(bounds, { maxZoom: 15, padding: [30, 30] });
+        }
+    }
+
+    function setupListeners() {
+        reloadBtn.addEventListener('click', fetchData);
+        
+        const filters = [cityFilter, serviceFilter, validFilter];
+        filters.forEach(filter => {
+            filter.addEventListener('change', () => { 
+                currentPage = 1; 
+                applyFilters(); 
+            });
+        });
+    }
+
+    // 抓取 CSV
+    function fetchData() {
+        loading.style.display = 'block';
+        dataTableBody.innerHTML = '';
+        
+        Papa.parse(CSV_URL, {
+            download: true,
+            header: true,
+            skipEmptyLines: true,
+            complete: function(results) {
+                loading.style.display = 'none';
+                
+                rawData = results.data.map(row => {
+                    const cityCode = row['縣市'] ? row['縣市'].trim() : '';
+                    return {
+                        ...row,
+                        '縣市中文': MAPPING.city[cityCode] || cityCode 
+                    };
+                });
+
+                // 依照「地址全址」進行排序
+                rawData.sort((a, b) => {
+                    const addressA = a['地址全址'] || '';
+                    const addressB = b['地址全址'] || '';
+                    return addressA.localeCompare(addressB, 'zh-TW');
+                });
+
+                filteredData = [...rawData];
+                updateDropdowns();
+                renderTable();
+            },
+            error: function(err) {
+                loading.style.display = 'none';
+                alert('抓取 CSV 失敗，請確認網址是否正確或有無 CORS 限制。');
+                console.error(err);
+            }
+        });
+    }
+
+    function updateDropdowns() {
+        const cities = new Set();
+        const services = new Set();
+
+        rawData.forEach(row => {
+            if (row['縣市中文']) cities.add(row['縣市中文']);
+            if (row['特約服務項目']) services.add(row['特約服務項目']);
+        });
+
+        function fillSelect(element, dataSet, defaultText) {
+            const currentVal = element.value;
+            element.innerHTML = `<option value="all">${defaultText}</option>`;
+            [...dataSet].sort().forEach(item => {
+                element.innerHTML += `<option value="${item}">${item}</option>`;
+            });
+            element.value = currentVal || 'all';
+        }
+
+        fillSelect(cityFilter, cities, '全部縣市');
+        fillSelect(serviceFilter, services, '全部服務項目');
+    }
+
+    function applyFilters() {
+        const selCity = cityFilter.value;
+        const selService = serviceFilter.value;
+        const selValid = validFilter.value;
+
+        filteredData = rawData.filter(row => {
+            const mCity = (selCity === 'all' || row['縣市中文'] === selCity);
+            const mService = (selService === 'all' || row['特約服務項目'] === selService);
+            
+            let mValid = true; 
+            if (selValid !== 'all') {
+                if (!row['特約迄日']) {
+                    mValid = (selValid === 'invalid'); 
+                } else {
+                    const dateStr = row['特約迄日'].replace(/\D/g, '');
+                    if (selValid === 'valid') {
+                        mValid = (dateStr > '20260101');
+                    } else if (selValid === 'invalid') {
+                        mValid = (dateStr <= '20260101');
+                    }
+                }
+            }
+            
+            return mCity && mService && mValid;
+        });
+
+        renderTable();
+    }
+
+    // 渲染表格 (並觸發地圖更新)
+    function renderTable() {
+        const start = (currentPage - 1) * rowsPerPage;
+        const end = start + rowsPerPage;
+        const pageData = filteredData.slice(start, end);
+
+        dataTableBody.innerHTML = '';
+
+        if (filteredData.length === 0) {
+            dataTableBody.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-4">無符合條件的資料</td></tr>';
+            pageInfo.innerText = '';
+            pagination.innerHTML = '';
+            
+            updateMapMarkers([]); // 清空地圖標記
+            return;
+        }
+
+        pageData.forEach((row, index) => {
+            const num = String(start + index + 1).padStart(2, '0');
+            const tr = document.createElement('tr');
+            
+            tr.innerHTML = `
+                <td>${num}</td>
+                <td>${row['縣市中文'] || ''}</td>
+                <td>${row['機構名稱'] || ''}</td>
+                <td>${row['地址全址'] || ''}</td>
+                <td>${row['特約服務項目'] || ''}</td>
+                <td>${row['機構電話'] || ''}</td>
+                <td>${row['特約起日'] || ''}</td>
+                <td>${row['特約迄日'] || ''}</td>
+            `;
+            dataTableBody.appendChild(tr);
+        });
+
+        renderPagination();
+        
+        // --- ★ 更新地圖，傳入當前頁面的資料 ---
+        updateMapMarkers(pageData); 
+    }
+
+    // 渲染分頁按鈕
+    function renderPagination() {
+        const totalPages = Math.ceil(filteredData.length / rowsPerPage);
+        pagination.innerHTML = '';
+        pageInfo.innerText = `總計 ${filteredData.length} 筆資料，第 ${currentPage} / ${totalPages} 頁`;
+
+        const prevLi = document.createElement('li');
+        prevLi.className = `page-item ${currentPage === 1 ? 'disabled' : ''}`;
+        prevLi.innerHTML = `<a class="page-link" href="#">上一頁</a>`;
+        prevLi.onclick = (e) => { e.preventDefault(); if(currentPage > 1) { currentPage--; renderTable(); }};
+        pagination.appendChild(prevLi);
+
+        const nextLi = document.createElement('li');
+        nextLi.className = `page-item ${currentPage === totalPages ? 'disabled' : ''}`;
+        nextLi.innerHTML = `<a class="page-link" href="#">下一頁</a>`;
+        nextLi.onclick = (e) => { e.preventDefault(); if(currentPage < totalPages) { currentPage++; renderTable(); }};
+        pagination.appendChild(nextLi);
+    }
+
+    // 執行初始化
+    init();
+</script>
+
+</body>
+</html>
